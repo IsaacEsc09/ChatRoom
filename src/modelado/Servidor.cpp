@@ -1,15 +1,15 @@
 #include <iostream>                
-#include <memory>                  // Para utilizar smart pointers (std::unique_ptr)
-#include <arpa/inet.h>             // Para funciones de red y estructuras como sockaddr_in
-#include <sys/socket.h>            // Para funciones de manejo de sockets (socket, bind, listen)
-#include <unistd.h>                // Para funciones del sistema como close()
+#include <memory>                  // Smart pointers
+#include <arpa/inet.h>             // Funciones de red
+#include <sys/socket.h>            // Manejo de sockets
+#include <unistd.h>                // Funciones del sistema
 #include "libs/json.hpp"           // Biblioteca para manejar JSON
 
 using json = nlohmann::json
 
 // Constructor que inicializa el servidor en un puerto específico
 Servidor::Servidor(int puerto) : puerto(puerto), servidorActivo(false) {
-    // Crear el socket del servidor
+    // Crea el socket del servidor
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1) {
         std::cerr << "Error al crear el socket del servidor" << std::endl;
