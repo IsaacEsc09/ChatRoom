@@ -1,34 +1,43 @@
 #include <iostream>
+#include <cstring>
+#include <netinet/in.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
-using namespace std;
-
-class Cliente {
-private:
-    int socketCliente;
-    struct sockaddr_in direccionServidor;
-    bool conectado;
-
-public:
-    Cliente(const std::string& ipServidor, int puerto);
-    ~Cliente();
-
-    bool conectar();
-    void enviarDatos(const std::vector<uint8_t>& datos);
-    std::vector<uint8_t> recibirDatos();
-    void desconectar();
-};
-
-Cliente::Cliente(const std::string& ipServidor, int puerto) : conectado(false) {
-    // Crea el socket
-    socketCliente = socket(AF_INET, SOCK_STREAM, 0);
-    if (socketCliente < 0) {
-        std::cerr << "Error al crear el socket\n";
-        exit(EXIT_FAILURE);
+int main() {
+    //Socket del cliente
+    int clientSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (clientSocket == -1) {
+        std::cerr << "Error al crear el socket del cliente" << std::endl;
+        return -1;
     }
 
-    // Configurar la dirección del servidor
-    direccionServidor.sin_family = AF_INET;
-    direccionServidor.sin_port = htons(puerto);
-    direccionServidor.sin_addr.s_addr = inet_addr(ipServidor.c_str());
+    sockaddr_in serverAddress;
+    serverAddress.sin_family = AF_INET;
+    serverAddress.sin_port = htons(8080);
+    serverAddress.sin_addr.s_addr = INADDR_ANY;
+
+    if (connect(clientSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
+        std::cerr << "Error al conectar con el servidor. Asegúrate de que el servidor está encendido." << std::endl;
+        close(clientSocket);
+        return -1;
+    }
+
+    std::cout << "Conectado al servidor." << std::endl;
+
+    std::string mensaje;
+    while (true) {
+        std::cout << "Mensaje: (o '/exit' para salir): ";
+        std::getline(std::cin, mensaje);
+
+        if (mensaje == "/exit") {
+            break;
+        }
+
+        send(clientSocket, mensaje.c_str(), mensaje.length(), 0);
+    }
+
+    close(clientSocket);
+
+    return 0;
 }
