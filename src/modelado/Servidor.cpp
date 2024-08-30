@@ -6,6 +6,7 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <arpa/inet.h>
 
 std::mutex coutMutex;
 
@@ -57,7 +58,11 @@ int main() {
         return -1;
     }
 
-    std::cout << "Servidor iniciado en el puerto: " << ntohs(addr.sin_port) << std::endl;
+    // Obtener la dirección IP y el puerto
+    char ipStr[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &addr.sin_addr, ipStr, sizeof(ipStr));
+
+    std::cout << "Servidor iniciado en la IP: " << ipStr << " y el puerto: " << ntohs(addr.sin_port) << std::endl;
 
     if (listen(serverSocket, 5) < 0) {
         std::cerr << "Error al escuchar en el socket: " << strerror(errno) << std::endl;
