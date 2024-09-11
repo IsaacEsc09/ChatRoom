@@ -29,9 +29,10 @@ void escucharServidor(int clientSocket) {
             continue;
         }
 
-        if (mensajeJson.contains("type") && mensajeJson["type"] == "MESSAGE") {
-            string remitente = mensajeJson["sender"];
-            string mensaje = mensajeJson["message"];
+        // Verificar si el mensaje es del tipo "PUBLIC_TEXT_FROM"
+        if (mensajeJson.contains("type") && mensajeJson["type"] == "PUBLIC_TEXT_FROM") {
+            string remitente = mensajeJson["username"];
+            string mensaje = mensajeJson["text"];
             cout << remitente << ": " << mensaje << endl;
         }
 
@@ -115,22 +116,24 @@ int main() {
     hiloEscuchar.detach();
 
     // Loop para enviar mensajes al servidor
-    string mensaje;
-    while (true) {
-        getline(cin, mensaje);
+string mensaje;
+while (true) {
+    getline(cin, mensaje);
 
-        if (mensaje == "/quit") {
-            break;
-        }
-
-        json mensajeJson = {
-            {"type", "MESSAGE"},
-            {"message", mensaje}
-        };
-
-        string mensajeStr = mensajeJson.dump();
-        send(clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+    if (mensaje == "/quit") {
+        break;
     }
+
+    // Cambiamos el tipo del mensaje a "PUBLIC_TEXT" para mensajes públicos
+    json mensajeJson = {
+        {"type", "PUBLIC_TEXT"},
+        {"text", mensaje}
+    };
+
+    string mensajeStr = mensajeJson.dump();
+    send(clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+}
+
 
     close(clientSocket);
     return 0;

@@ -53,20 +53,22 @@ string obtenerIPLocal() {
     return ipLocal;
 }
 
+// Función para retransmitir mensajes a todos los clientes conectados
 void broadcastMensaje(const string& mensaje, const string& remitente) {
     lock_guard<mutex> lock(clientMutex);
     
+    // Crear el mensaje JSON con el protocolo PUBLIC_TEXT_FROM
     nlohmann::json mensajeJson = {
-        {"type", "MESSAGE"},
-        {"sender", remitente},
-        {"message", mensaje}
+        {"type", "PUBLIC_TEXT_FROM"},
+        {"username", remitente},
+        {"text", mensaje}
     };
     
     string mensajeStr = mensajeJson.dump();
 
     // Enviar el mensaje a todos los clientes conectados
     for (const auto& cliente : clientes) {
-        send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);  // Aquí usamos cliente.second para el socket
+        send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);
     }
 }
 
@@ -74,6 +76,7 @@ void manejarCliente(int clientSocket) {
     char buffer[1024] = {0};
     string mensajeRecibido;
 
+    // Recibir el primer mensaje del cliente (para identificarlo)
     ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
     if (bytesRecibidos <= 0) {
         cerr << "Error al recibir el mensaje del cliente o conexión cerrada." << endl;
@@ -122,8 +125,20 @@ void manejarCliente(int clientSocket) {
 
                         string mensajeRecibido = string(buffer, bytesRecibidos);
 
-                        // Procesar el mensaje recibido y transmitir a otros clientes
-                        broadcastMensaje(mensajeRecibido, nombreCliente);
+                        // Parsear el mensaje recibido
+                        nlohmann::json mensajeJson;
+                        try {
+                            mensajeJson = nlohmann::json::parse(mensajeRecibido);
+                        } catch (const nlohmann::json::parse_error& e) {
+                            cerr << "Error al parsear el mensaje JSON: " << e.what() << endl;
+                            continue;
+                        }
+
+                        // Verificar si el mensaje es de tipo "PUBLIC_TEXT"
+                        if (mensajeJson.contains("type") && mensajeJson["type"] == "PUBLIC_TEXT") {
+                            string textoMensaje = mensajeJson["text"];
+                            broadcastMensaje(textoMensaje, nombreCliente);
+                        }
 
                         memset(buffer, 0, sizeof(buffer));
                     }
@@ -183,7 +198,6 @@ void aceptarConexiones(int serverSocket) {
         thread(manejarCliente, clientSocket).detach();
     }
 }
-
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
