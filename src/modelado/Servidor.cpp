@@ -1,4 +1,3 @@
-#include <iostream>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -7,18 +6,57 @@
 #include <map>
 #include <mutex>
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <iostream>
+#include "json.hpp"
 
 using namespace std;
 
 mutex coutMutex;
 mutex clientMutex;
-map<string, thread> clientes; // Diccionario para manejar los hilos de los clientes
+map<string, thread> clientes;
+
+bool esPuertoValido(const string& puertoStr) {
+    char* endptr;
+    errno = 0;
+    long puerto = strtol(puertoStr.c_str(), &endptr, 10);
+    return !(errno != 0 || *endptr != '\0' || endptr == puertoStr.c_str() || puerto <= 0 || puerto > 65535);
+}
+
+// Función para obtener la IP local de la red
+string obtenerIPLocal() {
+    struct ifaddrs *interfaces, *ifa;
+    string ipLocal = "";
+
+    if (getifaddrs(&interfaces) == -1) {
+        cerr << "Error al obtener las interfaces de red." << endl;
+        return ipLocal;
+    }
+
+    for (ifa = interfaces; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr) continue;
+
+        if (ifa->ifa_addr->sa_family == AF_INET) { // Solo IPv4
+            char ip[INET_ADDRSTRLEN];
+            void* addrPtr = &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr;
+            inet_ntop(AF_INET, addrPtr, ip, sizeof(ip));
+
+            // Evitar interfaces locales como lo (127.0.0.1)
+            if (strcmp(ifa->ifa_name, "lo") != 0) {
+                ipLocal = ip;
+                break;
+            }
+        }
+    }
+
+    freeifaddrs(interfaces);
+    return ipLocal;
+}
 
 void manejarCliente(int clientSocket) {
     char buffer[1024] = {0};
     string nombreCliente;
 
-    // Recibir el nombre del cliente
     ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
     if (bytesRecibidos <= 0) {
         cerr << "Error al recibir el nombre del cliente o conexión cerrada." << endl;
@@ -28,38 +66,54 @@ void manejarCliente(int clientSocket) {
 
     nombreCliente = string(buffer, bytesRecibidos);
 
-    lock_guard<mutex> lock(clientMutex);
-    if (clientes.find(nombreCliente) == clientes.end()) {
-        // Si el nombre no está en uso, agregar al diccionario y crear un hilo
-        clientes[nombreCliente] = thread([clientSocket, nombreCliente]() {
-            char buffer[1024] = {0};
-            while (true) {
-                ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
-                if (bytesRecibidos == 0) {
+    {
+        lock_guard<mutex> lock(clientMutex);
+        if (clientes.find(nombreCliente) == clientes.end()) {
+            clientes[nombreCliente] = thread([clientSocket, nombreCliente]() {
+                char buffer[1024] = {0};
+                {
                     lock_guard<mutex> lock(coutMutex);
-                    cout << "Cliente " << nombreCliente << " desconectado." << endl;
-                    break;
-                } else if (bytesRecibidos < 0) {
-                    lock_guard<mutex> lock(coutMutex);
-                    cerr << "Error al recibir datos de " << nombreCliente << endl;
-                    break;
+                    cout << "Cliente " << nombreCliente << " conectado." << endl;
                 }
 
-                lock_guard<mutex> lock(coutMutex);
-                cout << nombreCliente << ": " << buffer << endl;
-                memset(buffer, 0, sizeof(buffer));
-            }
+                while (true) {
+                    ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
+                    if (bytesRecibidos <= 0) {
+                        lock_guard<mutex> lock(coutMutex);
+                        cout << "Cliente " << nombreCliente << " desconectado." << endl;
+                        break;
+                    }
+
+                    string mensajeRecibido = nombreCliente + ": " + string(buffer, bytesRecibidos);
+
+                    {
+                        lock_guard<mutex> lock(clientMutex);
+                        for (const auto& cliente : clientes) {
+                            if (cliente.first != nombreCliente) {
+                                send(clientSocket, mensajeRecibido.c_str(), mensajeRecibido.length(), 0);
+                            }
+                        }
+                    }
+
+                    memset(buffer, 0, sizeof(buffer));
+                }
+
+                close(clientSocket);
+                {
+                    lock_guard<mutex> lock(clientMutex);
+                    clientes.erase(nombreCliente);
+                }
+            });
+
+            clientes[nombreCliente].detach();
+
+            string successMsg = "IDENTIFY_SUCCESS";
+            send(clientSocket, successMsg.c_str(), successMsg.length(), 0);
+        } else {
+            string errorMsg = "USER_ALREADY_EXISTS";
+            send(clientSocket, errorMsg.c_str(), errorMsg.length(), 0);
             close(clientSocket);
-            lock_guard<mutex> lock(clientMutex);
-            clientes.erase(nombreCliente);
-        });
-        clientes[nombreCliente].detach();
-        string successMsg = "IDENTIFY_SUCCESS";
-        send(clientSocket, successMsg.c_str(), successMsg.length(), 0);
-    } else {
-        string errorMsg = "USER_ALREADY_EXISTS";
-        send(clientSocket, errorMsg.c_str(), errorMsg.length(), 0);
-        close(clientSocket);
+        }
     }
 }
 
@@ -76,8 +130,28 @@ void aceptarConexiones(int serverSocket) {
     }
 }
 
-int main() {
-    //Socket del servidor
+int main(int argc, char* argv[]) {
+    if (argc != 2) {
+        cerr << "Uso: " << argv[0] << " <puerto>" << endl;
+        return -1;
+    }
+
+    string puertoStr = argv[1];
+    if (!esPuertoValido(puertoStr)) {
+        cerr << "Número de puerto inválido. Debe ser un número entero positivo entre 1 y 65535." << endl;
+        return -1;
+    }
+
+    int puerto = stoi(puertoStr);
+
+    string ipLocal = obtenerIPLocal();
+    if (ipLocal.empty()) {
+        cerr << "No se pudo obtener la IP local." << endl;
+        return -1;
+    }
+
+    cout << "Iniciando servidor en IP local: " << ipLocal << " y puerto: " << puerto << endl;
+
     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
     if (serverSocket == -1) {
         cerr << "Error al crear el socket del servidor: " << strerror(errno) << endl;
@@ -86,27 +160,19 @@ int main() {
 
     sockaddr_in serverAddress;
     serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(0);
-    serverAddress.sin_addr.s_addr = INADDR_ANY;
+    serverAddress.sin_port = htons(puerto);
+
+    if (inet_pton(AF_INET, ipLocal.c_str(), &serverAddress.sin_addr) <= 0) {
+        cerr << "Error al convertir la dirección IP." << endl;
+        close(serverSocket);
+        return -1;
+    }
 
     if (bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
         cerr << "Error al vincular el socket: " << strerror(errno) << endl;
         close(serverSocket);
         return -1;
     }
-
-    sockaddr_in addr;
-    socklen_t len = sizeof(addr);
-    if (getsockname(serverSocket, (struct sockaddr*)&addr, &len) == -1) {
-        cerr << "Error al obtener el puerto asignado: " << strerror(errno) << endl;
-        close(serverSocket);
-        return -1;
-    }
-
-    char ipStr[INET_ADDRSTRLEN];
-    inet_ntop(AF_INET, &addr.sin_addr, ipStr, sizeof(ipStr));
-
-    cout << "Servidor iniciado en la IP: " << ipStr << " y el puerto: " << ntohs(addr.sin_port) << endl;
 
     if (listen(serverSocket, 5) < 0) {
         cerr << "Error al escuchar en el socket: " << strerror(errno) << endl;
@@ -123,3 +189,5 @@ int main() {
 
     return 0;
 }
+
+
