@@ -14,7 +14,7 @@ using namespace std;
 
 mutex coutMutex;
 mutex clientMutex;
-map<string, thread> clientes;
+map<string, int> clientes;
 
 bool esPuertoValido(const string& puertoStr) {
     char* endptr;
@@ -53,6 +53,23 @@ string obtenerIPLocal() {
     return ipLocal;
 }
 
+void broadcastMensaje(const string& mensaje, const string& remitente) {
+    lock_guard<mutex> lock(clientMutex);
+    
+    nlohmann::json mensajeJson = {
+        {"type", "MESSAGE"},
+        {"sender", remitente},
+        {"message", mensaje}
+    };
+    
+    string mensajeStr = mensajeJson.dump();
+
+    // Enviar el mensaje a todos los clientes conectados
+    for (const auto& cliente : clientes) {
+        send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);  // Aquí usamos cliente.second para el socket
+    }
+}
+
 void manejarCliente(int clientSocket) {
     char buffer[1024] = {0};
     string mensajeRecibido;
@@ -84,8 +101,11 @@ void manejarCliente(int clientSocket) {
         {
             lock_guard<mutex> lock(clientMutex);
             if (clientes.find(nombreCliente) == clientes.end()) {
-                // Si el nombre de usuario no existe, creamos un nuevo hilo para el cliente
-                clientes[nombreCliente] = thread([clientSocket, nombreCliente]() {
+                // Guardar el nombre del cliente y el socket
+                clientes[nombreCliente] = clientSocket;
+
+                // Crear un nuevo hilo para manejar al cliente (solo para recibir mensajes del cliente)
+                thread([clientSocket, nombreCliente]() {
                     char buffer[1024] = {0};
                     {
                         lock_guard<mutex> lock(coutMutex);
@@ -102,9 +122,8 @@ void manejarCliente(int clientSocket) {
 
                         string mensajeRecibido = string(buffer, bytesRecibidos);
 
-                        // Procesar el mensaje recibido (por simplicidad lo imprimimos)
-                        lock_guard<mutex> lock(coutMutex);
-                        cout << nombreCliente << ": " << mensajeRecibido << endl;
+                        // Procesar el mensaje recibido y transmitir a otros clientes
+                        broadcastMensaje(mensajeRecibido, nombreCliente);
 
                         memset(buffer, 0, sizeof(buffer));
                     }
@@ -112,11 +131,9 @@ void manejarCliente(int clientSocket) {
                     close(clientSocket);
                     {
                         lock_guard<mutex> lock(clientMutex);
-                        clientes.erase(nombreCliente);
+                        clientes.erase(nombreCliente);  // Eliminar el cliente cuando se desconecta
                     }
-                });
-
-                clientes[nombreCliente].detach();
+                }).detach();
 
                 // Enviar mensaje de éxito en formato JSON
                 nlohmann::json respuestaJson = {
@@ -227,5 +244,3 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
-
-

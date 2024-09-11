@@ -4,10 +4,40 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include "json.hpp" 
+#include <thread>
+#include "json.hpp" // Incluimos la biblioteca para manejar JSON
 
 using namespace std;
 using json = nlohmann::json;
+
+void escucharServidor(int clientSocket) {
+    char buffer[1024] = {0};
+    
+    while (true) {
+        ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
+        if (bytesRecibidos <= 0) {
+            cerr << "Conexión cerrada por el servidor o error al recibir." << endl;
+            break;
+        }
+
+        string mensajeRecibido(buffer, bytesRecibidos);
+        json mensajeJson;
+        try {
+            mensajeJson = json::parse(mensajeRecibido);
+        } catch (const json::parse_error& e) {
+            cerr << "Error al parsear el mensaje JSON: " << e.what() << endl;
+            continue;
+        }
+
+        if (mensajeJson.contains("type") && mensajeJson["type"] == "MESSAGE") {
+            string remitente = mensajeJson["sender"];
+            string mensaje = mensajeJson["message"];
+            cout << remitente << ": " << mensaje << endl;
+        }
+
+        memset(buffer, 0, sizeof(buffer));
+    }
+}
 
 int main() {
     string host;
@@ -74,29 +104,34 @@ int main() {
     // Verificar el resultado de la identificación
     if (respuestaJson.contains("result") && respuestaJson["result"] == "SUCCESS") {
         cout << "Nombre/ID aceptado. Puedes comenzar a enviar mensajes." << endl;
-    } else if (respuestaJson["result"] == "USER_ALREADY_EXISTS") {
-        cerr << "Nombre/ID ya en uso. Intenta con otro nombre." << endl;
-        close(clientSocket);
-        return -1;
     } else {
-        cerr << "Error desconocido: " << respuestaJson.dump() << endl;
+        cerr << "Identificación fallida: " << respuestaJson["message"] << endl;
         close(clientSocket);
         return -1;
     }
 
-    // Bucle para enviar mensajes
+    // Lanzar un hilo para escuchar los mensajes del servidor
+    thread hiloEscuchar(escucharServidor, clientSocket);
+    hiloEscuchar.detach();
+
+    // Loop para enviar mensajes al servidor
     string mensaje;
     while (true) {
-        cout << "Mensaje: (o '/exit' para salir): ";
         getline(cin, mensaje);
 
-        if (mensaje == "/exit") {
+        if (mensaje == "/quit") {
             break;
         }
-        send(clientSocket, mensaje.c_str(), mensaje.length(), 0);
+
+        json mensajeJson = {
+            {"type", "MESSAGE"},
+            {"message", mensaje}
+        };
+
+        string mensajeStr = mensajeJson.dump();
+        send(clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
     }
 
     close(clientSocket);
-
     return 0;
 }

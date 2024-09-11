@@ -6,6 +6,6 @@ Una vez clonado el repositorio "ChatRoom", debe situarse en el directorio mismo 
 `$ make`
 Se generarán dos ejecutables: "servidor" y "cliente".
 Para correr/ejecutar el servidor debe estar situado en la carpeta /build y dar el comando:
-`$ ./servidor`
+`$ ./servidor <puerto>`
 Para el cliente es lo mismo:
 `$ ./cliente`
