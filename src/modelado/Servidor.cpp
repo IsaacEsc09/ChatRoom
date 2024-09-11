@@ -55,65 +55,102 @@ string obtenerIPLocal() {
 
 void manejarCliente(int clientSocket) {
     char buffer[1024] = {0};
-    string nombreCliente;
+    string mensajeRecibido;
 
     ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
     if (bytesRecibidos <= 0) {
-        cerr << "Error al recibir el nombre del cliente o conexión cerrada." << endl;
+        cerr << "Error al recibir el mensaje del cliente o conexión cerrada." << endl;
         close(clientSocket);
         return;
     }
 
-    nombreCliente = string(buffer, bytesRecibidos);
+    // Convertimos el mensaje recibido en un string
+    mensajeRecibido = string(buffer, bytesRecibidos);
 
-    {
-        lock_guard<mutex> lock(clientMutex);
-        if (clientes.find(nombreCliente) == clientes.end()) {
-            clientes[nombreCliente] = thread([clientSocket, nombreCliente]() {
-                char buffer[1024] = {0};
-                {
-                    lock_guard<mutex> lock(coutMutex);
-                    cout << "Cliente " << nombreCliente << " conectado." << endl;
-                }
+    // Parseamos el mensaje JSON
+    nlohmann::json mensajeJson;
+    try {
+        mensajeJson = nlohmann::json::parse(mensajeRecibido);
+    } catch (const nlohmann::json::parse_error& e) {
+        cerr << "Error al parsear el mensaje JSON: " << e.what() << endl;
+        close(clientSocket);
+        return;
+    }
 
-                while (true) {
-                    ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
-                    if (bytesRecibidos <= 0) {
+    // Verificamos que el mensaje sea de tipo IDENTIFY
+    if (mensajeJson.contains("type") && mensajeJson["type"] == "IDENTIFY" && mensajeJson.contains("username")) {
+        string nombreCliente = mensajeJson["username"];
+        
+        {
+            lock_guard<mutex> lock(clientMutex);
+            if (clientes.find(nombreCliente) == clientes.end()) {
+                // Si el nombre de usuario no existe, creamos un nuevo hilo para el cliente
+                clientes[nombreCliente] = thread([clientSocket, nombreCliente]() {
+                    char buffer[1024] = {0};
+                    {
                         lock_guard<mutex> lock(coutMutex);
-                        cout << "Cliente " << nombreCliente << " desconectado." << endl;
-                        break;
+                        cout << "Cliente " << nombreCliente << " conectado." << endl;
                     }
 
-                    string mensajeRecibido = nombreCliente + ": " + string(buffer, bytesRecibidos);
+                    while (true) {
+                        ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
+                        if (bytesRecibidos <= 0) {
+                            lock_guard<mutex> lock(coutMutex);
+                            cout << "Cliente " << nombreCliente << " desconectado." << endl;
+                            break;
+                        }
 
+                        string mensajeRecibido = string(buffer, bytesRecibidos);
+
+                        // Procesar el mensaje recibido (por simplicidad lo imprimimos)
+                        lock_guard<mutex> lock(coutMutex);
+                        cout << nombreCliente << ": " << mensajeRecibido << endl;
+
+                        memset(buffer, 0, sizeof(buffer));
+                    }
+
+                    close(clientSocket);
                     {
                         lock_guard<mutex> lock(clientMutex);
-                        for (const auto& cliente : clientes) {
-                            if (cliente.first != nombreCliente) {
-                                send(clientSocket, mensajeRecibido.c_str(), mensajeRecibido.length(), 0);
-                            }
-                        }
+                        clientes.erase(nombreCliente);
                     }
+                });
 
-                    memset(buffer, 0, sizeof(buffer));
-                }
+                clientes[nombreCliente].detach();
 
+                // Enviar mensaje de éxito en formato JSON
+                nlohmann::json respuestaJson = {
+                    {"type", "RESPONSE"},
+                    {"operation", "IDENTIFY"},
+                    {"result", "SUCCESS"},
+                    {"username", nombreCliente}
+                };
+                string respuestaStr = respuestaJson.dump();
+                send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
+            } else {
+                // El nombre de usuario ya existe
+                nlohmann::json respuestaJson = {
+                    {"type", "RESPONSE"},
+                    {"operation", "IDENTIFY"},
+                    {"result", "USER_ALREADY_EXISTS"},
+                    {"username", nombreCliente}
+                };
+                string respuestaStr = respuestaJson.dump();
+                send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
                 close(clientSocket);
-                {
-                    lock_guard<mutex> lock(clientMutex);
-                    clientes.erase(nombreCliente);
-                }
-            });
-
-            clientes[nombreCliente].detach();
-
-            string successMsg = "IDENTIFY_SUCCESS";
-            send(clientSocket, successMsg.c_str(), successMsg.length(), 0);
-        } else {
-            string errorMsg = "USER_ALREADY_EXISTS";
-            send(clientSocket, errorMsg.c_str(), errorMsg.length(), 0);
-            close(clientSocket);
+            }
         }
+    } else {
+        // Mensaje inválido, enviamos un error al cliente
+        nlohmann::json respuestaJson = {
+            {"type", "RESPONSE"},
+            {"operation", "INVALID"},
+            {"result", "ERROR"},
+            {"message", "Mensaje no reconocido o malformado"}
+        };
+        string respuestaStr = respuestaJson.dump();
+        send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
+        close(clientSocket);
     }
 }
 
@@ -129,6 +166,7 @@ void aceptarConexiones(int serverSocket) {
         thread(manejarCliente, clientSocket).detach();
     }
 }
+
 
 int main(int argc, char* argv[]) {
     if (argc != 2) {
