@@ -9,9 +9,11 @@
 #include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <iostream>
+#include <memory>
 #include "json.hpp"
 
 using namespace std;
+using json = nlohmann::json;
 
 mutex coutMutex;
 mutex clientMutex;
@@ -57,7 +59,7 @@ string obtenerIPLocal() {
 void broadcastMensaje(const string& mensaje, const string& remitente) {
     lock_guard<mutex> lock(clientMutex);
 
-    nlohmann::json mensajeJson = {
+    json mensajeJson = {
         {"type", "PUBLIC_TEXT_FROM"},
         {"username", remitente},
         {"text", mensaje}
@@ -73,7 +75,7 @@ void broadcastMensaje(const string& mensaje, const string& remitente) {
 void notificarDesconexion(const string& nombreCliente) {
     lock_guard<mutex> lock(clientMutex);
 
-    nlohmann::json mensajeJson = {
+    json mensajeJson = {
         {"type", "DISCONNECTED"},
         {"username", nombreCliente}
     };
@@ -88,7 +90,7 @@ void notificarSalidaCuartos(const string& nombreCliente) {
     lock_guard<mutex> lock(clientMutex);
 
     for (const auto& cuarto : cuartos[nombreCliente]) {
-        nlohmann::json mensajeJson = {
+        json mensajeJson = {
             {"type", "LEFT_ROOM"},
             {"roomname", cuarto},
             {"username", nombreCliente}
@@ -104,7 +106,7 @@ void notificarSalidaCuartos(const string& nombreCliente) {
 void notificarCambioEstado(const string& nombreCliente, const string& nuevoEstado) {
     lock_guard<mutex> lock(clientMutex);
 
-    nlohmann::json mensajeEstadoJson = {
+    json mensajeEstadoJson = {
         {"type", "NEW_STATUS"},
         {"username", nombreCliente},
         {"status", nuevoEstado}
@@ -129,10 +131,10 @@ void manejarCliente(int clientSocket) {
 
     mensajeRecibido = string(buffer, bytesRecibidos);
 
-    nlohmann::json mensajeJson;
+    json mensajeJson;
     try {
-        mensajeJson = nlohmann::json::parse(mensajeRecibido);
-    } catch (const nlohmann::json::parse_error& e) {
+        mensajeJson = json::parse(mensajeRecibido);
+    } catch (const json::parse_error& e) {
         cerr << "Error al parsear el mensaje JSON: " << e.what() << endl;
         close(clientSocket);
         return;
@@ -141,13 +143,30 @@ void manejarCliente(int clientSocket) {
     if (mensajeJson.contains("type") && mensajeJson["type"] == "IDENTIFY" && mensajeJson.contains("username")) {
         string nombreCliente = mensajeJson["username"];
 
+        // Validar longitud del nombre de usuario
+        if (nombreCliente.length() > 8) {
+            json respuestaJson = {
+                {"type", "RESPONSE"},
+                {"operation", "IDENTIFY"},
+                {"result", "INVALID_USERNAME"},
+                {"message", "El nombre de usuario debe tener 8 caracteres o menos"}
+            };
+            string respuestaStr = respuestaJson.dump();
+            send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
+            close(clientSocket);
+            return;
+        }
+
         {
             lock_guard<mutex> lock(clientMutex);
             if (clientes.find(nombreCliente) == clientes.end()) {
                 clientes[nombreCliente] = clientSocket;
                 estadosClientes[nombreCliente] = "ACTIVE";  // Estado inicial
 
-                thread([clientSocket, nombreCliente]() {
+                // Utilizar std::shared_ptr para manejar el socket del cliente
+                auto clientSocketPtr = make_shared<int>(clientSocket);
+
+                thread([clientSocketPtr, nombreCliente]() {
                     char buffer[1024] = {0};
                     {
                         lock_guard<mutex> lock(coutMutex);
@@ -155,7 +174,7 @@ void manejarCliente(int clientSocket) {
                     }
 
                     while (true) {
-                        ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
+                        ssize_t bytesRecibidos = recv(*clientSocketPtr, buffer, sizeof(buffer), 0);
                         if (bytesRecibidos <= 0) {
                             lock_guard<mutex> lock(coutMutex);
                             cout << "Cliente " << nombreCliente << " desconectado." << endl;
@@ -164,10 +183,10 @@ void manejarCliente(int clientSocket) {
 
                         string mensajeRecibido = string(buffer, bytesRecibidos);
 
-                        nlohmann::json mensajeJson;
+                        json mensajeJson;
                         try {
-                            mensajeJson = nlohmann::json::parse(mensajeRecibido);
-                        } catch (const nlohmann::json::parse_error& e) {
+                            mensajeJson = json::parse(mensajeRecibido);
+                        } catch (const json::parse_error& e) {
                             cerr << "Error al parsear el mensaje JSON: " << e.what() << endl;
                             continue;
                         }
@@ -189,33 +208,33 @@ void manejarCliente(int clientSocket) {
                                 estadosClientes[nombreCliente] = nuevoEstado;
                                 notificarCambioEstado(nombreCliente, nuevoEstado);
                             } else {
-                                nlohmann::json mensajeErrorJson = {
+                                json mensajeErrorJson = {
                                     {"type", "RESPONSE"},
                                     {"operation", "STATUS"},
                                     {"result", "INVALID_STATUS"}
                                 };
                                 string mensajeErrorStr = mensajeErrorJson.dump();
-                                send(clientSocket, mensajeErrorStr.c_str(), mensajeErrorStr.length(), 0);
+                                send(*clientSocketPtr, mensajeErrorStr.c_str(), mensajeErrorStr.length(), 0);
                             }
                         } else if (mensajeJson.contains("type") && mensajeJson["type"] == "USER_LIST") {
-                            nlohmann::json listaUsuariosJson = {
+                            json listaUsuariosJson = {
                                 {"type", "USER_LIST"},
-                                {"users", nlohmann::json::object()}
+                                {"users", json::object()}
                             };
                             for (const auto& [usuario, estado] : estadosClientes) {
                                 listaUsuariosJson["users"][usuario] = estado;
                             }
                             string listaUsuariosStr = listaUsuariosJson.dump();
-                            send(clientSocket, listaUsuariosStr.c_str(), listaUsuariosStr.length(), 0);
+                            send(*clientSocketPtr, listaUsuariosStr.c_str(), listaUsuariosStr.length(), 0);
                         }
 
                         memset(buffer, 0, sizeof(buffer));
                     }
 
-                    close(clientSocket);
+                    close(*clientSocketPtr);
                 }).detach();
 
-                nlohmann::json respuestaJson = {
+                json respuestaJson = {
                     {"type", "RESPONSE"},
                     {"operation", "IDENTIFY"},
                     {"result", "SUCCESS"},
@@ -223,10 +242,8 @@ void manejarCliente(int clientSocket) {
                 };
                 string respuestaStr = respuestaJson.dump();
                 send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
-
-                // Eliminar la lista de usuarios que se enviaba automáticamente
             } else {
-                nlohmann::json respuestaJson = {
+                json respuestaJson = {
                     {"type", "RESPONSE"},
                     {"operation", "IDENTIFY"},
                     {"result", "USER_ALREADY_EXISTS"},
@@ -238,11 +255,11 @@ void manejarCliente(int clientSocket) {
             }
         }
     } else {
-        nlohmann::json respuestaJson = {
+        json respuestaJson = {
             {"type", "RESPONSE"},
             {"operation", "INVALID"},
             {"result", "ERROR"},
-            {"message", "Mensaje no reconocido o malformado"}
+            {"message", "Tipo de mensaje no reconocido"}
         };
         string respuestaStr = respuestaJson.dump();
         send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
@@ -250,58 +267,57 @@ void manejarCliente(int clientSocket) {
     }
 }
 
-void aceptarConexiones(int serverSocket) {
-    while (true) {
-        int clientSocket = accept(serverSocket, nullptr, nullptr);
-        if (clientSocket < 0) {
-            cerr << "Error al aceptar la conexión: " << strerror(errno) << endl;
-            continue;
-        }
-
-        thread(manejarCliente, clientSocket).detach();
-    }
-}
-
 int main(int argc, char* argv[]) {
-    if (argc != 2 || !esPuertoValido(argv[1])) {
+    if (argc != 2) {
         cerr << "Uso: " << argv[0] << " <puerto>" << endl;
         return 1;
     }
 
-    int puerto = stoi(argv[1]);
-
-    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == 0) {
-        cerr << "Error al crear el socket: " << strerror(errno) << endl;
+    string puertoStr = argv[1];
+    if (!esPuertoValido(puertoStr)) {
+        cerr << "Número de puerto inválido." << endl;
         return 1;
     }
 
-    int opt = 1;
-    if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
-        cerr << "Error al configurar el socket: " << strerror(errno) << endl;
+    int puerto = stoi(puertoStr);
+    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSocket == 0) {
+        cerr << "Error al crear el socket." << endl;
         return 1;
     }
 
     struct sockaddr_in direccionServidor;
-    memset(&direccionServidor, 0, sizeof(direccionServidor));
     direccionServidor.sin_family = AF_INET;
     direccionServidor.sin_addr.s_addr = INADDR_ANY;
     direccionServidor.sin_port = htons(puerto);
 
     if (bind(serverSocket, (struct sockaddr*)&direccionServidor, sizeof(direccionServidor)) < 0) {
-        cerr << "Error al enlazar el socket: " << strerror(errno) << endl;
+        cerr << "Error al hacer bind al socket." << endl;
+        close(serverSocket);
         return 1;
     }
 
     if (listen(serverSocket, 3) < 0) {
-        cerr << "Error al escuchar en el socket: " << strerror(errno) << endl;
+        cerr << "Error al poner el socket en modo listening." << endl;
+        close(serverSocket);
         return 1;
     }
 
-    cout << "Servidor en ejecución en IP local: " << obtenerIPLocal() << " y puerto: " << puerto << endl;
-    cout << "Esperando conexiones..." << endl;
+    cout << "Servidor escuchando en el puerto " << puerto << " en la IP " << obtenerIPLocal() << endl;
 
-    aceptarConexiones(serverSocket);
+    while (true) {
+        struct sockaddr_in direccionCliente;
+        socklen_t tamanoDireccionCliente = sizeof(direccionCliente);
+        int clientSocket = accept(serverSocket, (struct sockaddr*)&direccionCliente, &tamanoDireccionCliente);
 
+        if (clientSocket < 0) {
+            cerr << "Error al aceptar la conexión del cliente." << endl;
+            continue;
+        }
+
+        thread(manejarCliente, clientSocket).detach();
+    }
+
+    close(serverSocket);
     return 0;
 }
