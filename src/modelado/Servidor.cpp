@@ -4,6 +4,7 @@
 #include <cstring>
 #include <thread>
 #include <map>
+#include <set>
 #include <mutex>
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -15,6 +16,7 @@ using namespace std;
 mutex coutMutex;
 mutex clientMutex;
 map<string, int> clientes;
+map<string, set<string>> cuartos; // Map de nombre de cliente a los cuartos a los que pertenece
 
 bool esPuertoValido(const string& puertoStr) {
     char* endptr;
@@ -69,6 +71,43 @@ void broadcastMensaje(const string& mensaje, const string& remitente) {
     // Enviar el mensaje a todos los clientes conectados
     for (const auto& cliente : clientes) {
         send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);
+    }
+}
+
+// Función para enviar el mensaje de desconexión a todos los clientes
+void notificarDesconexion(const string& nombreCliente) {
+    lock_guard<mutex> lock(clientMutex);
+
+    // Crear el mensaje JSON para NOTIFICAR la desconexión
+    nlohmann::json mensajeJson = {
+        {"type", "DISCONNECTED"},
+        {"username", nombreCliente}
+    };
+    string mensajeStr = mensajeJson.dump();
+
+    // Enviar el mensaje a todos los clientes conectados
+    for (const auto& cliente : clientes) {
+        send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);
+    }
+}
+
+// Función para enviar mensajes de salida de cuartos a los clientes
+void notificarSalidaCuartos(const string& nombreCliente) {
+    lock_guard<mutex> lock(clientMutex);
+
+    for (const auto& cuarto : cuartos[nombreCliente]) {
+        // Crear el mensaje JSON para NOTIFICAR la salida del cuarto
+        nlohmann::json mensajeJson = {
+            {"type", "LEFT_ROOM"},
+            {"roomname", cuarto},
+            {"username", nombreCliente}
+        };
+        string mensajeStr = mensajeJson.dump();
+
+        // Enviar el mensaje a todos los clientes conectados (o a un grupo específico si se necesita)
+        for (const auto& cliente : clientes) {
+            send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);
+        }
     }
 }
 
@@ -138,16 +177,23 @@ void manejarCliente(int clientSocket) {
                         if (mensajeJson.contains("type") && mensajeJson["type"] == "PUBLIC_TEXT") {
                             string textoMensaje = mensajeJson["text"];
                             broadcastMensaje(textoMensaje, nombreCliente);
+                        } else if (mensajeJson.contains("type") && mensajeJson["type"] == "DISCONNECT") {
+                            // El cliente solicita desconexión
+                            {
+                                lock_guard<mutex> lock(clientMutex);
+                                // Eliminar al cliente de la lista
+                                clientes.erase(nombreCliente);
+                                // Notificar desconexión y salida de cuartos
+                                notificarDesconexion(nombreCliente);
+                                notificarSalidaCuartos(nombreCliente);
+                            }
+                            break;
                         }
 
                         memset(buffer, 0, sizeof(buffer));
                     }
 
                     close(clientSocket);
-                    {
-                        lock_guard<mutex> lock(clientMutex);
-                        clientes.erase(nombreCliente);  // Eliminar el cliente cuando se desconecta
-                    }
                 }).detach();
 
                 // Enviar mensaje de éxito en formato JSON
