@@ -16,7 +16,8 @@ using namespace std;
 mutex coutMutex;
 mutex clientMutex;
 map<string, int> clientes;
-map<string, set<string>> cuartos; // Map de nombre de cliente a los cuartos a los que pertenece
+map<string, set<string>> cuartos;  // Cuartos asociados a cada cliente
+map<string, string> estadosClientes;  // Estados de cada cliente
 
 bool esPuertoValido(const string& puertoStr) {
     char* endptr;
@@ -25,7 +26,6 @@ bool esPuertoValido(const string& puertoStr) {
     return !(errno != 0 || *endptr != '\0' || endptr == puertoStr.c_str() || puerto <= 0 || puerto > 65535);
 }
 
-// Función para obtener la IP local de la red
 string obtenerIPLocal() {
     struct ifaddrs *interfaces, *ifa;
     string ipLocal = "";
@@ -38,12 +38,11 @@ string obtenerIPLocal() {
     for (ifa = interfaces; ifa != nullptr; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == nullptr) continue;
 
-        if (ifa->ifa_addr->sa_family == AF_INET) { // Solo IPv4
+        if (ifa->ifa_addr->sa_family == AF_INET) {
             char ip[INET_ADDRSTRLEN];
             void* addrPtr = &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr;
             inet_ntop(AF_INET, addrPtr, ip, sizeof(ip));
 
-            // Evitar interfaces locales como lo (127.0.0.1)
             if (strcmp(ifa->ifa_name, "lo") != 0) {
                 ipLocal = ip;
                 break;
@@ -55,48 +54,40 @@ string obtenerIPLocal() {
     return ipLocal;
 }
 
-// Función para retransmitir mensajes a todos los clientes conectados
 void broadcastMensaje(const string& mensaje, const string& remitente) {
     lock_guard<mutex> lock(clientMutex);
-    
-    // Crear el mensaje JSON con el protocolo PUBLIC_TEXT_FROM
+
     nlohmann::json mensajeJson = {
         {"type", "PUBLIC_TEXT_FROM"},
         {"username", remitente},
         {"text", mensaje}
     };
-    
+
     string mensajeStr = mensajeJson.dump();
 
-    // Enviar el mensaje a todos los clientes conectados
     for (const auto& cliente : clientes) {
         send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);
     }
 }
 
-// Función para enviar el mensaje de desconexión a todos los clientes
 void notificarDesconexion(const string& nombreCliente) {
     lock_guard<mutex> lock(clientMutex);
 
-    // Crear el mensaje JSON para NOTIFICAR la desconexión
     nlohmann::json mensajeJson = {
         {"type", "DISCONNECTED"},
         {"username", nombreCliente}
     };
     string mensajeStr = mensajeJson.dump();
 
-    // Enviar el mensaje a todos los clientes conectados
     for (const auto& cliente : clientes) {
         send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);
     }
 }
 
-// Función para enviar mensajes de salida de cuartos a los clientes
 void notificarSalidaCuartos(const string& nombreCliente) {
     lock_guard<mutex> lock(clientMutex);
 
     for (const auto& cuarto : cuartos[nombreCliente]) {
-        // Crear el mensaje JSON para NOTIFICAR la salida del cuarto
         nlohmann::json mensajeJson = {
             {"type", "LEFT_ROOM"},
             {"roomname", cuarto},
@@ -104,10 +95,24 @@ void notificarSalidaCuartos(const string& nombreCliente) {
         };
         string mensajeStr = mensajeJson.dump();
 
-        // Enviar el mensaje a todos los clientes conectados (o a un grupo específico si se necesita)
         for (const auto& cliente : clientes) {
             send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);
         }
+    }
+}
+
+void notificarCambioEstado(const string& nombreCliente, const string& nuevoEstado) {
+    lock_guard<mutex> lock(clientMutex);
+
+    nlohmann::json mensajeEstadoJson = {
+        {"type", "NEW_STATUS"},
+        {"username", nombreCliente},
+        {"status", nuevoEstado}
+    };
+    string mensajeEstadoStr = mensajeEstadoJson.dump();
+
+    for (const auto& cliente : clientes) {
+        send(cliente.second, mensajeEstadoStr.c_str(), mensajeEstadoStr.length(), 0);
     }
 }
 
@@ -115,7 +120,6 @@ void manejarCliente(int clientSocket) {
     char buffer[1024] = {0};
     string mensajeRecibido;
 
-    // Recibir el primer mensaje del cliente (para identificarlo)
     ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
     if (bytesRecibidos <= 0) {
         cerr << "Error al recibir el mensaje del cliente o conexión cerrada." << endl;
@@ -123,10 +127,8 @@ void manejarCliente(int clientSocket) {
         return;
     }
 
-    // Convertimos el mensaje recibido en un string
     mensajeRecibido = string(buffer, bytesRecibidos);
 
-    // Parseamos el mensaje JSON
     nlohmann::json mensajeJson;
     try {
         mensajeJson = nlohmann::json::parse(mensajeRecibido);
@@ -136,17 +138,15 @@ void manejarCliente(int clientSocket) {
         return;
     }
 
-    // Verificamos que el mensaje sea de tipo IDENTIFY
     if (mensajeJson.contains("type") && mensajeJson["type"] == "IDENTIFY" && mensajeJson.contains("username")) {
         string nombreCliente = mensajeJson["username"];
-        
+
         {
             lock_guard<mutex> lock(clientMutex);
             if (clientes.find(nombreCliente) == clientes.end()) {
-                // Guardar el nombre del cliente y el socket
                 clientes[nombreCliente] = clientSocket;
+                estadosClientes[nombreCliente] = "ACTIVE";  // Estado inicial
 
-                // Crear un nuevo hilo para manejar al cliente (solo para recibir mensajes del cliente)
                 thread([clientSocket, nombreCliente]() {
                     char buffer[1024] = {0};
                     {
@@ -164,7 +164,6 @@ void manejarCliente(int clientSocket) {
 
                         string mensajeRecibido = string(buffer, bytesRecibidos);
 
-                        // Parsear el mensaje recibido
                         nlohmann::json mensajeJson;
                         try {
                             mensajeJson = nlohmann::json::parse(mensajeRecibido);
@@ -173,21 +172,41 @@ void manejarCliente(int clientSocket) {
                             continue;
                         }
 
-                        // Verificar si el mensaje es de tipo "PUBLIC_TEXT"
                         if (mensajeJson.contains("type") && mensajeJson["type"] == "PUBLIC_TEXT") {
                             string textoMensaje = mensajeJson["text"];
                             broadcastMensaje(textoMensaje, nombreCliente);
                         } else if (mensajeJson.contains("type") && mensajeJson["type"] == "DISCONNECT") {
-                            // El cliente solicita desconexión
                             {
                                 lock_guard<mutex> lock(clientMutex);
-                                // Eliminar al cliente de la lista
                                 clientes.erase(nombreCliente);
-                                // Notificar desconexión y salida de cuartos
                                 notificarDesconexion(nombreCliente);
                                 notificarSalidaCuartos(nombreCliente);
                             }
                             break;
+                        } else if (mensajeJson.contains("type") && mensajeJson["type"] == "STATUS") {
+                            string nuevoEstado = mensajeJson["status"];
+                            if (nuevoEstado == "ACTIVE" || nuevoEstado == "AWAY" || nuevoEstado == "BUSY") {
+                                estadosClientes[nombreCliente] = nuevoEstado;
+                                notificarCambioEstado(nombreCliente, nuevoEstado);
+                            } else {
+                                nlohmann::json mensajeErrorJson = {
+                                    {"type", "RESPONSE"},
+                                    {"operation", "STATUS"},
+                                    {"result", "INVALID_STATUS"}
+                                };
+                                string mensajeErrorStr = mensajeErrorJson.dump();
+                                send(clientSocket, mensajeErrorStr.c_str(), mensajeErrorStr.length(), 0);
+                            }
+                        } else if (mensajeJson.contains("type") && mensajeJson["type"] == "USER_LIST") {
+                            nlohmann::json listaUsuariosJson = {
+                                {"type", "USER_LIST"},
+                                {"users", nlohmann::json::object()}
+                            };
+                            for (const auto& [usuario, estado] : estadosClientes) {
+                                listaUsuariosJson["users"][usuario] = estado;
+                            }
+                            string listaUsuariosStr = listaUsuariosJson.dump();
+                            send(clientSocket, listaUsuariosStr.c_str(), listaUsuariosStr.length(), 0);
                         }
 
                         memset(buffer, 0, sizeof(buffer));
@@ -196,7 +215,6 @@ void manejarCliente(int clientSocket) {
                     close(clientSocket);
                 }).detach();
 
-                // Enviar mensaje de éxito en formato JSON
                 nlohmann::json respuestaJson = {
                     {"type", "RESPONSE"},
                     {"operation", "IDENTIFY"},
@@ -205,8 +223,9 @@ void manejarCliente(int clientSocket) {
                 };
                 string respuestaStr = respuestaJson.dump();
                 send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
+
+                // Eliminar la lista de usuarios que se enviaba automáticamente
             } else {
-                // El nombre de usuario ya existe
                 nlohmann::json respuestaJson = {
                     {"type", "RESPONSE"},
                     {"operation", "IDENTIFY"},
@@ -219,7 +238,6 @@ void manejarCliente(int clientSocket) {
             }
         }
     } else {
-        // Mensaje inválido, enviamos un error al cliente
         nlohmann::json respuestaJson = {
             {"type", "RESPONSE"},
             {"operation", "INVALID"},
@@ -240,67 +258,50 @@ void aceptarConexiones(int serverSocket) {
             continue;
         }
 
-        cout << "Cliente conectado. Solicitando identificación..." << endl;
         thread(manejarCliente, clientSocket).detach();
     }
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 2) {
+    if (argc != 2 || !esPuertoValido(argv[1])) {
         cerr << "Uso: " << argv[0] << " <puerto>" << endl;
-        return -1;
+        return 1;
     }
 
-    string puertoStr = argv[1];
-    if (!esPuertoValido(puertoStr)) {
-        cerr << "Número de puerto inválido. Debe ser un número entero positivo entre 1 y 65535." << endl;
-        return -1;
-    }
-
-    int puerto = stoi(puertoStr);
-
-    string ipLocal = obtenerIPLocal();
-    if (ipLocal.empty()) {
-        cerr << "No se pudo obtener la IP local." << endl;
-        return -1;
-    }
-
-    cout << "Iniciando servidor en IP local: " << ipLocal << " y puerto: " << puerto << endl;
+    int puerto = stoi(argv[1]);
 
     int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == -1) {
-        cerr << "Error al crear el socket del servidor: " << strerror(errno) << endl;
-        return -1;
+    if (serverSocket == 0) {
+        cerr << "Error al crear el socket: " << strerror(errno) << endl;
+        return 1;
     }
 
-    sockaddr_in serverAddress;
-    serverAddress.sin_family = AF_INET;
-    serverAddress.sin_port = htons(puerto);
-
-    if (inet_pton(AF_INET, ipLocal.c_str(), &serverAddress.sin_addr) <= 0) {
-        cerr << "Error al convertir la dirección IP." << endl;
-        close(serverSocket);
-        return -1;
+    int opt = 1;
+    if (setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt))) {
+        cerr << "Error al configurar el socket: " << strerror(errno) << endl;
+        return 1;
     }
 
-    if (bind(serverSocket, (struct sockaddr*)&serverAddress, sizeof(serverAddress)) < 0) {
-        cerr << "Error al vincular el socket: " << strerror(errno) << endl;
-        close(serverSocket);
-        return -1;
+    struct sockaddr_in direccionServidor;
+    memset(&direccionServidor, 0, sizeof(direccionServidor));
+    direccionServidor.sin_family = AF_INET;
+    direccionServidor.sin_addr.s_addr = INADDR_ANY;
+    direccionServidor.sin_port = htons(puerto);
+
+    if (bind(serverSocket, (struct sockaddr*)&direccionServidor, sizeof(direccionServidor)) < 0) {
+        cerr << "Error al enlazar el socket: " << strerror(errno) << endl;
+        return 1;
     }
 
-    if (listen(serverSocket, 5) < 0) {
+    if (listen(serverSocket, 3) < 0) {
         cerr << "Error al escuchar en el socket: " << strerror(errno) << endl;
-        close(serverSocket);
-        return -1;
+        return 1;
     }
 
+    cout << "Servidor en ejecución en IP local: " << obtenerIPLocal() << " y puerto: " << puerto << endl;
     cout << "Esperando conexiones..." << endl;
 
-    thread hiloAceptarConexiones(aceptarConexiones, serverSocket);
-    hiloAceptarConexiones.join();
-
-    close(serverSocket);
+    aceptarConexiones(serverSocket);
 
     return 0;
 }

@@ -127,15 +127,15 @@ void escucharServidor(int clientSocket) {
                     cout << "Invitación a sala -> " << usuario << ": " << sala << endl;
                     break;
                 }
-                case TipoMensaje::USER_LIST: {
-                    cout << "Usuarios conectados y sus estados:\n";
-                    for (auto it = mensajeJson["users"].begin(); it != mensajeJson["users"].end(); ++it) {
-                        string username = it.key();  // Nombre del usuario
-                        string status = it.value();  // Estado del usuario
-                        cout << username << ": " << status << endl;
-                    }
-                    break;
-                }
+case TipoMensaje::USER_LIST: {
+    cout << "Usuarios conectados y sus estados:\n";
+    for (auto it = mensajeJson["users"].begin(); it != mensajeJson["users"].end(); ++it) {
+        string username = it.key();  // Nombre del usuario
+        string status = it.value();  // Estado del usuario
+        cout << username << ": " << status << endl;
+    }
+    break;
+}
                 case TipoMensaje::NEW_STATUS: {
                     string usuario = mensajeJson["username"];
                     string estado = mensajeJson["status"];
@@ -152,6 +152,7 @@ void escucharServidor(int clientSocket) {
         memset(buffer, 0, sizeof(buffer));
     }
 }
+
 
 int main() {
     string host;
@@ -237,17 +238,24 @@ int main() {
             string mensajeStr = mensajeJson.dump();
             send(clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
             break;
+        } else if (mensaje == "/user_list") {
+            // Solicitar la lista de usuarios
+            json mensajeJson = {{"type", "USER_LIST"}};
+            string mensajeStr = mensajeJson.dump();
+            send(clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+        } else {
+            // Enviar mensaje de texto
+            json mensajeJson = {
+                {"type", "PUBLIC_TEXT"},
+                {"text", mensaje}
+            };
+
+            string mensajeStr = mensajeJson.dump();
+            send(clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
         }
-
-        json mensajeJson = {
-            {"type", "PUBLIC_TEXT"},
-            {"text", mensaje}
-        };
-
-        string mensajeStr = mensajeJson.dump();
-        send(clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
     }
 
     close(clientSocket);
     return 0;
 }
+
