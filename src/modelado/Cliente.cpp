@@ -188,50 +188,82 @@ int main() {
         }
     }
 
-    // Lanzar un hilo para escuchar los mensajes del servidor
-    auto hiloEscuchar = make_shared<thread>(escucharServidor, *clientSocket);
-    hiloEscuchar->detach();
+    // Crear y lanzar el hilo para escuchar al servidor
+    thread escuchaThread(escucharServidor, *clientSocket);
 
-    // Loop para enviar mensajes al servidor
-    string mensaje;
+    // Bucle principal para enviar mensajes
     while (true) {
-        getline(cin, mensaje);
+        string entrada;
+        getline(cin, entrada);
 
-        if (mensaje == "/exit") {
-            // Enviar el mensaje de desconexión
-            json mensajeJson = {{"type", "DISCONNECT"}};
-            string mensajeStr = mensajeJson.dump();
-            send(*clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+        if (entrada == "/user_list") {
+            json mensajeListaUsuarios = {{"type", "USER_LIST"}};
+            string mensajeStr = mensajeListaUsuarios.dump();
+            ssize_t bytesEnviados = send(*clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+            if (bytesEnviados <= 0) {
+                cerr << "Error al solicitar la lista de usuarios." << endl;
+            }
+        } else if (entrada == "/disconnect") {
+            json mensajeDesconexion = {{"type", "DISCONNECT"}};
+            string mensajeStr = mensajeDesconexion.dump();
+            ssize_t bytesEnviados = send(*clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+            if (bytesEnviados <= 0) {
+                cerr << "Error al enviar el mensaje de desconexión." << endl;
+            }
             break;
-        } else if (mensaje == "/user_list") {
-            // Solicitar la lista de usuarios
-            json mensajeJson = {{"type", "USER_LIST"}};
-            string mensajeStr = mensajeJson.dump();
-            send(*clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
-        } else if (mensaje == "/status_ACTIVE" || mensaje == "/status_AWAY" || mensaje == "/status_BUSY") {
-            // Enviar el cambio de estado
-            string estado;
-            if (mensaje == "/status_ACTIVE") estado = "ACTIVE";
-            else if (mensaje == "/status_AWAY") estado = "AWAY";
-            else if (mensaje == "/status_BUSY") estado = "BUSY";
-
-            json mensajeJson = {
-                {"type", "STATUS"},
-                {"status", estado}
-            };
-            string mensajeStr = mensajeJson.dump();
-            send(*clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+        } else if (entrada.find("/privateMessage") == 0) {
+            // Manejo de mensajes privados
+            // Estructura: "/privateMessage <nombreCliente> <mensaje>"
+            string mensajePrivado = entrada.substr(16);
+            size_t espacioPos = mensajePrivado.find(' ');
+            if (espacioPos != string::npos) {
+                string destinatario = mensajePrivado.substr(0, espacioPos);
+                string mensaje = mensajePrivado.substr(espacioPos + 1);
+                json mensajePrivadoJson = {
+                    {"type", "TEXT"},
+                    {"username", destinatario},
+                    {"text", mensaje}
+                };
+                string mensajeStr = mensajePrivadoJson.dump();
+                ssize_t bytesEnviados = send(*clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+                if (bytesEnviados <= 0) {
+                    cerr << "Error al enviar el mensaje privado." << endl;
+                }
+            } else {
+                cout << "Formato de mensaje privado incorrecto. Usa: /privateMessage <nombreCliente> <mensaje>" << endl;
+            }
+        } else if (entrada.find("/status_") == 0) {
+            string estado = entrada.substr(8);
+            if (estado == "ACTIVE" || estado == "AWAY" || estado == "BUSY") {
+                json mensajeEstado = {
+                    {"type", "UPDATE_STATUS"},
+                    {"status", estado}
+                };
+                string mensajeStr = mensajeEstado.dump();
+                ssize_t bytesEnviados = send(*clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+                if (bytesEnviados <= 0) {
+                    cerr << "Error al enviar el cambio de estado." << endl;
+                }
+            } else {
+                cout << "Estado inválido. Usa /status_ACTIVE, /status_AWAY o /status_BUSY." << endl;
+            }
         } else {
-            // Enviar mensaje de texto
-            json mensajeJson = {
-                {"type", "PUBLIC_TEXT"},
-                {"text", mensaje}
+            // Mensaje de texto normal
+            json mensajeTexto = {
+                {"type", "TEXT"},
+                {"text", entrada}
             };
-
-            string mensajeStr = mensajeJson.dump();
-            send(*clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+            string mensajeStr = mensajeTexto.dump();
+            ssize_t bytesEnviados = send(*clientSocket, mensajeStr.c_str(), mensajeStr.length(), 0);
+            if (bytesEnviados <= 0) {
+                cerr << "Error al enviar el mensaje de texto." << endl;
+            }
         }
     }
 
+    // Esperar a que el hilo de escucha termine antes de cerrar el cliente
+    escuchaThread.join();
+    close(*clientSocket);
     return 0;
 }
+

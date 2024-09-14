@@ -15,12 +15,22 @@
 using namespace std;
 using json = nlohmann::json;
 
+// Mutex para asegurar acceso seguro a la consola
 mutex coutMutex;
-mutex clientMutex;
-map<string, int> clientes;
-map<string, set<string>> cuartos;  // Cuartos asociados a cada cliente
-map<string, string> estadosClientes;  // Estados de cada cliente
 
+// Mutex para asegurar acceso seguro a la información de los clientes
+mutex clientMutex;
+
+// Mapa que asocia nombres de usuario con descriptores de socket
+map<string, int> clientes;
+
+// Mapa que asocia cada cliente con los cuartos en los que está
+map<string, set<string>> cuartos;
+
+// Mapa que asocia nombres de usuario con sus estados
+map<string, string> estadosClientes;
+
+// Función para validar si un puerto es válido (rango de 1 a 65535)
 bool esPuertoValido(const string& puertoStr) {
     char* endptr;
     errno = 0;
@@ -28,15 +38,18 @@ bool esPuertoValido(const string& puertoStr) {
     return !(errno != 0 || *endptr != '\0' || endptr == puertoStr.c_str() || puerto <= 0 || puerto > 65535);
 }
 
+// Función para obtener la dirección IP local de la interfaz de red activa
 string obtenerIPLocal() {
     struct ifaddrs *interfaces, *ifa;
     string ipLocal = "";
 
+    // Obtener las interfaces de red
     if (getifaddrs(&interfaces) == -1) {
         cerr << "Error al obtener las interfaces de red." << endl;
         return ipLocal;
     }
 
+    // Iterar sobre las interfaces para encontrar una dirección IP válida
     for (ifa = interfaces; ifa != nullptr; ifa = ifa->ifa_next) {
         if (ifa->ifa_addr == nullptr) continue;
 
@@ -45,6 +58,7 @@ string obtenerIPLocal() {
             void* addrPtr = &((struct sockaddr_in*)ifa->ifa_addr)->sin_addr;
             inet_ntop(AF_INET, addrPtr, ip, sizeof(ip));
 
+            // Evitar la interfaz de loopback "lo"
             if (strcmp(ifa->ifa_name, "lo") != 0) {
                 ipLocal = ip;
                 break;
@@ -56,9 +70,11 @@ string obtenerIPLocal() {
     return ipLocal;
 }
 
+// Función para enviar un mensaje de texto a todos los clientes conectados
 void broadcastMensaje(const string& mensaje, const string& remitente) {
     lock_guard<mutex> lock(clientMutex);
 
+    // Crear el mensaje en formato JSON
     json mensajeJson = {
         {"type", "PUBLIC_TEXT_FROM"},
         {"username", remitente},
@@ -67,11 +83,13 @@ void broadcastMensaje(const string& mensaje, const string& remitente) {
 
     string mensajeStr = mensajeJson.dump();
 
+    // Enviar el mensaje a todos los clientes
     for (const auto& cliente : clientes) {
         send(cliente.second, mensajeStr.c_str(), mensajeStr.length(), 0);
     }
 }
 
+// Función para notificar a todos los clientes que un cliente se ha desconectado
 void notificarDesconexion(const string& nombreCliente) {
     lock_guard<mutex> lock(clientMutex);
 
@@ -86,6 +104,7 @@ void notificarDesconexion(const string& nombreCliente) {
     }
 }
 
+// Función para notificar a todos los clientes que un cliente ha salido de todos los cuartos
 void notificarSalidaCuartos(const string& nombreCliente) {
     lock_guard<mutex> lock(clientMutex);
 
@@ -103,6 +122,7 @@ void notificarSalidaCuartos(const string& nombreCliente) {
     }
 }
 
+// Función para notificar a todos los clientes el cambio de estado de un cliente
 void notificarCambioEstado(const string& nombreCliente, const string& nuevoEstado) {
     lock_guard<mutex> lock(clientMutex);
 
@@ -118,10 +138,12 @@ void notificarCambioEstado(const string& nombreCliente, const string& nuevoEstad
     }
 }
 
+// Función que maneja la comunicación con un cliente específico
 void manejarCliente(int clientSocket) {
     char buffer[1024] = {0};
     string mensajeRecibido;
 
+    // Recibir el mensaje del cliente
     ssize_t bytesRecibidos = recv(clientSocket, buffer, sizeof(buffer), 0);
     if (bytesRecibidos <= 0) {
         cerr << "Error al recibir el mensaje del cliente o conexión cerrada." << endl;
@@ -140,6 +162,7 @@ void manejarCliente(int clientSocket) {
         return;
     }
 
+    // Procesar el mensaje recibido según su tipo
     if (mensajeJson.contains("type") && mensajeJson["type"] == "IDENTIFY" && mensajeJson.contains("username")) {
         string nombreCliente = mensajeJson["username"];
 
@@ -159,6 +182,7 @@ void manejarCliente(int clientSocket) {
 
         {
             lock_guard<mutex> lock(clientMutex);
+            // Verificar si el nombre de usuario ya está en uso
             if (clientes.find(nombreCliente) == clientes.end()) {
                 clientes[nombreCliente] = clientSocket;
                 estadosClientes[nombreCliente] = "ACTIVE";  // Estado inicial
@@ -166,6 +190,7 @@ void manejarCliente(int clientSocket) {
                 // Utilizar std::shared_ptr para manejar el socket del cliente
                 auto clientSocketPtr = make_shared<int>(clientSocket);
 
+                // Crear un nuevo hilo para manejar la comunicación con el cliente
                 thread([clientSocketPtr, nombreCliente]() {
                     char buffer[1024] = {0};
                     {
@@ -191,6 +216,7 @@ void manejarCliente(int clientSocket) {
                             continue;
                         }
 
+                        // Procesar el mensaje según su tipo
                         if (mensajeJson.contains("type") && mensajeJson["type"] == "PUBLIC_TEXT") {
                             string textoMensaje = mensajeJson["text"];
                             broadcastMensaje(textoMensaje, nombreCliente);
@@ -227,27 +253,16 @@ void manejarCliente(int clientSocket) {
                             string listaUsuariosStr = listaUsuariosJson.dump();
                             send(*clientSocketPtr, listaUsuariosStr.c_str(), listaUsuariosStr.length(), 0);
                         }
-
-                        memset(buffer, 0, sizeof(buffer));
                     }
 
                     close(*clientSocketPtr);
                 }).detach();
-
-                json respuestaJson = {
-                    {"type", "RESPONSE"},
-                    {"operation", "IDENTIFY"},
-                    {"result", "SUCCESS"},
-                    {"username", nombreCliente}
-                };
-                string respuestaStr = respuestaJson.dump();
-                send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
             } else {
                 json respuestaJson = {
                     {"type", "RESPONSE"},
                     {"operation", "IDENTIFY"},
-                    {"result", "USER_ALREADY_EXISTS"},
-                    {"username", nombreCliente}
+                    {"result", "USERNAME_TAKEN"},
+                    {"message", "El nombre de usuario ya está en uso"}
                 };
                 string respuestaStr = respuestaJson.dump();
                 send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
@@ -257,16 +272,17 @@ void manejarCliente(int clientSocket) {
     } else {
         json respuestaJson = {
             {"type", "RESPONSE"},
-            {"operation", "INVALID"},
-            {"result", "ERROR"},
-            {"message", "Tipo de mensaje no reconocido"}
+            {"operation", "UNKNOWN"},
+            {"result", "INVALID_OPERATION"}
         };
         string respuestaStr = respuestaJson.dump();
         send(clientSocket, respuestaStr.c_str(), respuestaStr.length(), 0);
-        close(clientSocket);
     }
+
+    close(clientSocket);
 }
 
+// Función principal que inicia el servidor
 int main(int argc, char* argv[]) {
     if (argc != 2) {
         cerr << "Uso: " << argv[0] << " <puerto>" << endl;
@@ -275,41 +291,47 @@ int main(int argc, char* argv[]) {
 
     string puertoStr = argv[1];
     if (!esPuertoValido(puertoStr)) {
-        cerr << "Número de puerto inválido." << endl;
+        cerr << "Puerto inválido. Debe estar en el rango 1-65535." << endl;
         return 1;
     }
 
     int puerto = stoi(puertoStr);
-    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == 0) {
-        cerr << "Error al crear el socket." << endl;
+    int serverFd = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverFd == -1) {
+        cerr << "Error al crear el socket del servidor." << endl;
         return 1;
     }
 
-    struct sockaddr_in direccionServidor;
-    direccionServidor.sin_family = AF_INET;
-    direccionServidor.sin_addr.s_addr = INADDR_ANY;
-    direccionServidor.sin_port = htons(puerto);
+    sockaddr_in serverAddr = {};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(puerto);
 
-    if (bind(serverSocket, (struct sockaddr*)&direccionServidor, sizeof(direccionServidor)) < 0) {
-        cerr << "Error al hacer bind al socket." << endl;
-        close(serverSocket);
+    if (bind(serverFd, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        cerr << "Error al vincular el socket al puerto." << endl;
+        close(serverFd);
         return 1;
     }
 
-    if (listen(serverSocket, 3) < 0) {
-        cerr << "Error al poner el socket en modo listening." << endl;
-        close(serverSocket);
+    if (listen(serverFd, 3) < 0) {
+        cerr << "Error al poner el socket en modo de escucha." << endl;
+        close(serverFd);
         return 1;
     }
 
-    cout << "Servidor escuchando en el puerto " << puerto << " en la IP " << obtenerIPLocal() << endl;
+    string ipLocal = obtenerIPLocal();
+    if (ipLocal.empty()) {
+        cerr << "No se pudo obtener la IP local." << endl;
+        close(serverFd);
+        return 1;
+    }
+
+    cout << "Servidor escuchando en " << ipLocal << ":" << puerto << endl;
 
     while (true) {
-        struct sockaddr_in direccionCliente;
-        socklen_t tamanoDireccionCliente = sizeof(direccionCliente);
-        int clientSocket = accept(serverSocket, (struct sockaddr*)&direccionCliente, &tamanoDireccionCliente);
-
+        sockaddr_in clientAddr = {};
+        socklen_t clientAddrLen = sizeof(clientAddr);
+        int clientSocket = accept(serverFd, (struct sockaddr*)&clientAddr, &clientAddrLen);
         if (clientSocket < 0) {
             cerr << "Error al aceptar la conexión del cliente." << endl;
             continue;
@@ -318,6 +340,6 @@ int main(int argc, char* argv[]) {
         thread(manejarCliente, clientSocket).detach();
     }
 
-    close(serverSocket);
+    close(serverFd);
     return 0;
 }
